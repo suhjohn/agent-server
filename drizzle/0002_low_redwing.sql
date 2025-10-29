@@ -1,0 +1,1 @@
+ALTER TABLE `sessions` ADD `model` text DEFAULT 'anthropic/claude-4-sonnet-20250514' NOT NULL;

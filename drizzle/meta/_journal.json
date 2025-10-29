@@ -1,0 +1,48 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1755064579851,
+      "tag": "0000_free_molten_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1756054150047,
+      "tag": "0001_cynical_the_anarchist",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1757301375886,
+      "tag": "0002_low_redwing",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1757819536664,
+      "tag": "0003_common_amazoness",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1758522922852,
+      "tag": "0004_rainy_killraven",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1760840470600,
+      "tag": "0005_worthless_mathemanic",
+      "breakpoints": true
+    }
+  ]
+}

@@ -20,9 +20,14 @@ const createApp = (): express.Application => {
   app.use(helmet());
 
   // CORS configuration
-  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",") || [
-    "http://localhost:3000",
-  ];
+  const envOrigins =
+    process.env.ALLOWED_ORIGINS?.split(",")
+      .map((o) => o.trim())
+      .filter(Boolean) || [];
+  const defaultOrigins = ["http://localhost:3000", "https://agentdesktop.ai"];
+  const allowedOrigins = Array.from(
+    new Set([...defaultOrigins, ...envOrigins])
+  );
   app.use(
     cors({
       origin: allowedOrigins,

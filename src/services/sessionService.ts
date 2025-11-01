@@ -49,6 +49,10 @@ const DEFAULT_DIRECTORY_DEPTH = Math.min(
   MAX_DIRECTORY_DEPTH
 );
 const gitRootCache = new Map<string, string | null>();
+let cachedFdBinary: "fd" | "fdfind" | null | undefined;
+
+const escapeShellArg = (value: string) =>
+  `'${value.replace(/'/g, "'\\''")}'`;
 
 export const listSessionsWithStreaming = async () => {
   const sessions = await getAllSessions();
@@ -301,11 +305,77 @@ export const getFilesystemDirectories = async ({
       ? maxDepth
       : DEFAULT_DIRECTORY_DEPTH;
   const depth = Math.min(Math.max(requestedDepth, 1), MAX_DIRECTORY_DEPTH);
+  const buildFdCommand = (binary: "fd" | "fdfind") => {
+    const commandParts: string[] = [
+      binary,
+      "--hidden",
+      "--no-ignore",
+      "--absolute-path",
+      "--color=never",
+      "--min-depth",
+      "1",
+      "--max-depth",
+      `${depth}`,
+      "--max-results",
+      "200",
+      "--sort=path",
+      "--exclude",
+      ".git",
+      "--exclude",
+      escapeShellArg(".git/*"),
+    ];
+
+    if (includeFiles) {
+      commandParts.push("--type", "d", "--type", "f");
+    } else {
+      commandParts.push("--type", "d");
+    }
+
+    commandParts.push("--", ".", escapeShellArg(fullPath));
+    return commandParts.join(" ");
+  };
+
   const findCommand = includeFiles
     ? `find "${fullPath}" -mindepth 1 -maxdepth ${depth} \\( -type f -o -type d \\) ! -path '*/.git' ! -path '*/.git/*' 2>/dev/null | head -200 | sort`
     : `find "${fullPath}" -mindepth 1 -maxdepth ${depth} -type d ! -path '*/.git' ! -path '*/.git/*' 2>/dev/null | head -200 | sort`;
 
-  const { stdout } = await execAsync(findCommand);
+  const attemptFdSearch = async () => {
+    const candidates: Array<"fd" | "fdfind"> =
+      cachedFdBinary === undefined
+        ? ["fd", "fdfind"]
+        : cachedFdBinary === null
+        ? []
+        : [cachedFdBinary];
+
+    let lastError: unknown;
+    for (const binary of candidates) {
+      try {
+        const result = await execAsync(buildFdCommand(binary));
+        cachedFdBinary = binary;
+        return result.stdout;
+      } catch (error) {
+        lastError = error;
+        cachedFdBinary = undefined;
+      }
+    }
+
+    if (cachedFdBinary === undefined) {
+      cachedFdBinary = null;
+    }
+
+    throw lastError ?? new Error("fd command execution failed");
+  };
+
+  let stdout: string;
+  try {
+    stdout = await attemptFdSearch();
+  } catch (error) {
+    if (process.env.NODE_ENV !== "test") {
+      console.warn("fd command failed, falling back to find:", error);
+    }
+    const result = await execAsync(findCommand);
+    stdout = result.stdout;
+  }
 
   const entries = await Promise.all(
     stdout

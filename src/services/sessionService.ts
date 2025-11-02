@@ -49,6 +49,28 @@ const DEFAULT_DIRECTORY_DEPTH = Math.min(
   MAX_DIRECTORY_DEPTH
 );
 const gitRootCache = new Map<string, string | null>();
+let fdAvailability: boolean | null = null;
+
+const escapeShellArg = (value: string) =>
+  `"${value.replace(/(["\\$`!])/g, "\\$1")}"`;
+
+const escapeRegex = (value: string) =>
+  value.replace(/[|\\{}()[\]^$+*?.-]/g, "\\$&");
+
+const isFdAvailable = async () => {
+  if (fdAvailability !== null) {
+    return fdAvailability;
+  }
+
+  try {
+    await execAsync("command -v fd");
+    fdAvailability = true;
+  } catch {
+    fdAvailability = false;
+  }
+
+  return fdAvailability;
+};
 
 export const listSessionsWithStreaming = async () => {
   const sessions = await getAllSessions();
@@ -274,71 +296,109 @@ const getWorktreeInfo = async (
   }
 };
 
+const isSubsequence = (needle: string, haystack: string) => {
+  if (!needle) return true;
+  let index = 0;
+  for (const char of haystack) {
+    if (char === needle[index]) {
+      index += 1;
+      if (index === needle.length) {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
 export const getFilesystemDirectories = async ({
   path: targetPath,
   includeFiles = false,
   maxDepth,
 }: FilesystemOptions) => {
-  const { target, fullPath } = resolveTargetPath(targetPath);
-
-  let targetDirectoryExists = false;
-  try {
-    const stats = await fs.stat(fullPath);
-    targetDirectoryExists = stats.isDirectory();
-  } catch {
-    targetDirectoryExists = false;
-  }
-
   const requestedDepth =
     typeof maxDepth === "number" && Number.isFinite(maxDepth)
       ? maxDepth
       : DEFAULT_DIRECTORY_DEPTH;
   const depth = Math.min(Math.max(requestedDepth, 1), MAX_DIRECTORY_DEPTH);
-  const findCommand = includeFiles
-    ? `find "${BASE_WORKSPACE_PATH}" -mindepth 1 -maxdepth ${depth} \\( -type f -o -type d \\) ! -path '*/.git' ! -path '*/.git/*' 2>/dev/null`
-    : `find "${BASE_WORKSPACE_PATH}" -mindepth 1 -maxdepth ${depth} -type d ! -path '*/.git' ! -path '*/.git/*' 2>/dev/null`;
 
-  const { stdout } = await execAsync(findCommand);
+  const rawSearch = targetPath?.trim() ?? "";
+  const searchTokens = rawSearch.length
+    ? rawSearch
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0)
+    : [];
 
-  const rawSearch = target.trim().toLowerCase();
-  const rawSearchCollapsed = rawSearch.replace(/\s+/g, " ");
-  const searchTokens = target
-    .split(/[\\/\s]+/)
-    .map((token) => token.trim().toLowerCase())
-    .filter((token) => token.length > 0);
-  const matchedPaths = stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
+  const runFdSearch = async (): Promise<string[]> => {
+    const normalizedTokens = searchTokens.map((token) => escapeRegex(token));
+    const fdPattern =
+      normalizedTokens.length > 0 ? normalizedTokens.join(".*") : ".*";
+    const fdArgs: string[] = [
+      "fd",
+      "--absolute-path",
+      "--full-path",
+      "--ignore-case",
+      "--hidden",
+      "--no-ignore",
+      "--follow",
+      "--color",
+      "never",
+      "--max-depth",
+      depth.toString(),
+      "--max-results",
+      "400",
+      "--print0",
+    ];
+
+    if (!includeFiles) {
+      fdArgs.push("--type", "d");
+    }
+
+    fdArgs.push(fdPattern);
+    fdArgs.push(BASE_WORKSPACE_PATH);
+
+    const command = fdArgs.map(escapeShellArg).join(" ");
+    const { stdout } = await execAsync(command);
+    return stdout
+      .split("\0")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  };
+
+  if (!(await isFdAvailable())) {
+    throw new AgentError(
+      "Filesystem search requires the `fd` command to be installed",
+      500
+    );
+  }
+
+  let candidatePaths: string[] = [];
+  try {
+    candidatePaths = await runFdSearch();
+  } catch (error) {
+    throw new AgentError("Failed to execute fd search", 500, error as Error);
+  }
+
+  candidatePaths = candidatePaths.filter((absolutePath) => {
+    const relativeCandidate = path.relative(BASE_WORKSPACE_PATH, absolutePath);
+    if (
+      relativeCandidate.startsWith("..") ||
+      path.isAbsolute(relativeCandidate)
+    ) {
+      return false;
+    }
+    if (relativeCandidate === ".git") {
+      return false;
+    }
+    return !relativeCandidate.includes("/.git/");
+  });
+
+  const matchedPaths = candidatePaths
     .map((absolutePath) => {
       const relativePath = path.relative(BASE_WORKSPACE_PATH, absolutePath);
-      const relativePathLower = relativePath.toLowerCase();
-      const normalizedPathForSearch = relativePathLower.replace(
-        /[\\/_\-.]+/g,
-        " "
-      );
-      const pathTokens = normalizedPathForSearch
-        .split(/\s+/)
-        .map((segment) => segment.trim())
-        .filter((segment) => segment.length > 0);
-
       if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
         return null;
       }
-
-      const matchesRaw =
-        rawSearchCollapsed.length === 0 ||
-        normalizedPathForSearch.includes(rawSearchCollapsed);
-      const matchesTokens =
-        searchTokens.length === 0 ||
-        searchTokens.every((token) =>
-          pathTokens.some((segment) => segment.includes(token))
-        );
-
-      if (!matchesRaw && !matchesTokens) {
-        return null;
-      }
-
       return { absolutePath, relativePath };
     })
     .filter(
@@ -391,34 +451,68 @@ export const getFilesystemDirectories = async ({
   let currentGitRootAbsolute: string | null = null;
   let currentGitRootRelative: string | null = null;
 
-  if (targetDirectoryExists) {
-    currentGitRootAbsolute = await findGitRootForPath(fullPath, true);
-    currentGitRootRelative = currentGitRootAbsolute
-      ? path.relative(BASE_WORKSPACE_PATH, currentGitRootAbsolute) || "/"
-      : null;
-  }
-
   let worktreeInfo: { isWorktree: boolean; worktreeDir: string | null } = {
     isWorktree: false,
     worktreeDir: null,
   };
-  if (targetDirectoryExists && currentGitRootAbsolute) {
-    worktreeInfo = await getWorktreeInfo(fullPath);
+
+  if (targetPath && targetPath.trim().length > 0) {
+    try {
+      const { fullPath } = resolveTargetPath(targetPath);
+
+      let inspectionPath = fullPath;
+      let stats: Awaited<ReturnType<typeof fs.stat>> | null = null;
+
+      // Walk up until we find an existing path within the workspace.
+      while (inspectionPath.startsWith(BASE_WORKSPACE_PATH)) {
+        try {
+          stats = await fs.stat(inspectionPath);
+          break;
+        } catch {
+          const parent = path.dirname(inspectionPath);
+          if (parent === inspectionPath) {
+            break;
+          }
+          inspectionPath = parent;
+        }
+      }
+
+      if (stats) {
+        const isDirectory = stats.isDirectory();
+        currentGitRootAbsolute = await findGitRootForPath(
+          inspectionPath,
+          isDirectory
+        );
+        currentGitRootRelative = currentGitRootAbsolute
+          ? path.relative(BASE_WORKSPACE_PATH, currentGitRootAbsolute) || "/"
+          : null;
+
+        const worktreeTargetDir = isDirectory
+          ? inspectionPath
+          : path.dirname(inspectionPath);
+        if (currentGitRootAbsolute) {
+          worktreeInfo = await getWorktreeInfo(currentGitRootAbsolute);
+        } else if (worktreeTargetDir.startsWith(BASE_WORKSPACE_PATH)) {
+          worktreeInfo = await getWorktreeInfo(worktreeTargetDir);
+        }
+      }
+    } catch {
+      // Ignore invalid target paths; fall back to defaults.
+    }
   }
 
   return {
-    path: target,
-    fullPath,
+    path: targetPath,
+    fullPath: targetPath
+      ? path.resolve(BASE_WORKSPACE_PATH, targetPath)
+      : BASE_WORKSPACE_PATH,
     entries: validEntries,
     count: validEntries.length,
     maxDepth: depth,
-    currentInGitRepo:
-      targetDirectoryExists && currentGitRootAbsolute !== null,
-    currentGitRoot: targetDirectoryExists ? currentGitRootRelative : null,
-    currentIsWorktree: targetDirectoryExists ? worktreeInfo.isWorktree : false,
-    currentWorktreeDir: targetDirectoryExists
-      ? worktreeInfo.worktreeDir
-      : null,
+    currentInGitRepo: Boolean(targetPath && currentGitRootAbsolute !== null),
+    currentGitRoot: targetPath ? currentGitRootRelative : null,
+    currentIsWorktree: targetPath ? worktreeInfo.isWorktree : false,
+    currentWorktreeDir: targetPath ? worktreeInfo.worktreeDir : null,
     timestamp: new Date().toISOString(),
   };
 };

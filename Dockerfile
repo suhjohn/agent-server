@@ -19,7 +19,9 @@ RUN apt-get update && \
     telnet \
     openssh-server \
     git \
+    fd-find \
     ripgrep && \
+    ln -s /usr/bin/fdfind /usr/local/bin/fd 2>/dev/null || true && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \

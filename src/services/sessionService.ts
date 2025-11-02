@@ -300,22 +300,42 @@ export const getFilesystemDirectories = async ({
 
   const { stdout } = await execAsync(findCommand);
 
-  const searchTermLower = target.toLowerCase();
+  const rawSearch = target.trim().toLowerCase();
+  const rawSearchCollapsed = rawSearch.replace(/\s+/g, " ");
+  const searchTokens = target
+    .split(/[\\/\s]+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length > 0);
   const matchedPaths = stdout
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map((absolutePath) => {
       const relativePath = path.relative(BASE_WORKSPACE_PATH, absolutePath);
+      const relativePathLower = relativePath.toLowerCase();
+      const normalizedPathForSearch = relativePathLower.replace(
+        /[\\/_\-.]+/g,
+        " "
+      );
+      const pathTokens = normalizedPathForSearch
+        .split(/\s+/)
+        .map((segment) => segment.trim())
+        .filter((segment) => segment.length > 0);
 
       if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
         return null;
       }
 
-      if (
-        searchTermLower &&
-        !relativePath.toLowerCase().includes(searchTermLower)
-      ) {
+      const matchesRaw =
+        rawSearchCollapsed.length === 0 ||
+        normalizedPathForSearch.includes(rawSearchCollapsed);
+      const matchesTokens =
+        searchTokens.length === 0 ||
+        searchTokens.every((token) =>
+          pathTokens.some((segment) => segment.includes(token))
+        );
+
+      if (!matchesRaw && !matchesTokens) {
         return null;
       }
 

@@ -36,7 +36,7 @@ const parsePositiveInteger = (
 
 const configuredMaxDepth = parsePositiveInteger(
   process.env.FILESYSTEM_MAX_DEPTH,
-  20
+  30
 );
 const configuredDefaultDepth = parsePositiveInteger(
   process.env.FILESYSTEM_DEFAULT_DEPTH,

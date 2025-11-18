@@ -112,6 +112,7 @@ async function runGenerationCore(params: {
         approvalPolicy: "never",
         mcpServers: MCP_SERVERS,
         images: generateRequest.images,
+        modelReasoningEffort: "high",
       },
     });
 

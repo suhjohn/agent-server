@@ -75,7 +75,10 @@ async def anthropic_messages(request: Request):
 async def responses(request: Request):
     """Responses endpoint that passes through to LiteLLM"""
     request_data = await request.json()
-    if "model_reasoning_effort" not in request_data:
+    if (
+        "model_reasoning_effort" not in request_data
+        or "model_reasoning_effort" == "none"
+    ):
         request_data["model_reasoning_effort"] = "high"
 
     if request_data.get("stream"):

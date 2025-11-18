@@ -547,6 +547,7 @@ router.post("/v2", validateApiKey, async (req: Request, res: Response) => {
           approvalPolicy: "never",
           mcpServers: MCP_SERVERS,
           images: generateRequest.images,
+          modelReasoningEffort: "high",
         },
       });
 

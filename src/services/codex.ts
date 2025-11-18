@@ -13,6 +13,7 @@ type CodexOptions = {
   cwd: string;
   model: string;
   approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
+  modelReasoningEffort: "low" | "medium" | "high";
   resume?: string | undefined; // -> resume <resume>
   images?: string[] | undefined; // -> --image <comma-separated-paths>
   mcpServers: Record<string, unknown>; // reserved for future use
@@ -51,9 +52,16 @@ function buildCodexArgs(prompt: string, opts: CodexOptions): string[] {
   if (opts.model) {
     args.push("-c", `model=${opts.model}`);
   }
+
   if (opts.approvalPolicy) {
     // Many CLIs use snake_case config keys; use a conservative name
     args.push("-c", `approval_policy=${opts.approvalPolicy}`);
+  }
+
+  if (opts.modelReasoningEffort) {
+    args.push("-c", `model_reasoning_effort=${opts.modelReasoningEffort}`);
+  } else if (opts.model.includes("gpt-5")) {
+    args.push("-c", `model_reasoning_effort=high`);
   }
 
   return args;

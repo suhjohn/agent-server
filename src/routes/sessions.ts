@@ -7,7 +7,8 @@ import {
   getSessionMessagesResponse,
   updateSessionNameResponse,
   deleteSessionById,
-  getFilesystemDirectories,
+  searchFiles,
+  getFiles,
   uploadFilesToFilesystem,
 } from "@/services/sessionService";
 import { isAgentError } from "@/utils/errors";
@@ -129,11 +130,11 @@ router.delete(
 );
 
 /**
- * GET /filesystem/directories
+ * GET /filesystem/search
  * Get all subdirectories using OS-native find command for better performance
  */
 router.get(
-  "/filesystem/directories",
+  "/filesystem/search",
   validateApiKey,
   async (req: Request, res: Response) => {
     try {
@@ -143,9 +144,11 @@ router.get(
       const includeFilesFlag =
         typeof includeFiles === "string" && includeFiles === "true";
       const depthValue =
-        typeof maxDepth === "string" ? Number.parseInt(maxDepth, 10) : undefined;
+        typeof maxDepth === "string"
+          ? Number.parseInt(maxDepth, 10)
+          : undefined;
 
-      const options: Parameters<typeof getFilesystemDirectories>[0] = {
+      const options: Parameters<typeof searchFiles>[0] = {
         path: targetPath ?? "",
         includeFiles: includeFilesFlag,
       };
@@ -158,11 +161,67 @@ router.get(
         options.maxDepth = depthValue;
       }
 
-      const payload = await getFilesystemDirectories(options);
+      const payload = await searchFiles(options);
 
       res.json(payload);
     } catch (error) {
       respondWithAgentError(res, error, "Failed to read directory");
+    }
+  }
+);
+
+/**
+ * GET /filesystem/files
+ * Get child files/directories under a given path up to a maximum depth and limit.
+ */
+router.get(
+  "/filesystem/files",
+  validateApiKey,
+  async (req: Request, res: Response) => {
+    try {
+      const {
+        path: targetPathQuery,
+        includeFiles,
+        maxDepth,
+        limit,
+      } = req.query;
+      const targetPath =
+        typeof targetPathQuery === "string" ? targetPathQuery : undefined;
+      const includeFilesFlag =
+        typeof includeFiles === "string" && includeFiles === "true";
+      const depthValue =
+        typeof maxDepth === "string"
+          ? Number.parseInt(maxDepth, 10)
+          : undefined;
+      const limitValue =
+        typeof limit === "string" ? Number.parseInt(limit, 10) : undefined;
+
+      const options: Parameters<typeof getFiles>[0] = {
+        path: targetPath ?? "",
+        includeFiles: includeFilesFlag,
+      };
+
+      if (
+        typeof depthValue === "number" &&
+        Number.isFinite(depthValue) &&
+        depthValue >= 1
+      ) {
+        options.maxDepth = depthValue;
+      }
+
+      if (
+        typeof limitValue === "number" &&
+        Number.isFinite(limitValue) &&
+        limitValue >= 1
+      ) {
+        options.limit = limitValue;
+      }
+
+      const payload = await getFiles(options);
+
+      res.json(payload);
+    } catch (error) {
+      respondWithAgentError(res, error, "Failed to list files");
     }
   }
 );
@@ -179,22 +238,20 @@ router.post(
       const relativePaths = Array.isArray(rawRelativePaths)
         ? rawRelativePaths
         : typeof rawRelativePaths === "string"
-          ? [rawRelativePaths]
-          : [];
+        ? [rawRelativePaths]
+        : [];
 
       const rawFiles = Array.isArray(req.files)
         ? req.files
         : req.files
-          ? Object.values(req.files).flat()
-          : [];
+        ? Object.values(req.files).flat()
+        : [];
 
       const payload = await uploadFilesToFilesystem({
         path: targetPath,
         files: rawFiles.map((file, index) => ({
           originalname:
-            relativePaths[index] ||
-            file.originalname ||
-            file.fieldname,
+            relativePaths[index] || file.originalname || file.fieldname,
           buffer: file.buffer,
           size: file.size,
         })),

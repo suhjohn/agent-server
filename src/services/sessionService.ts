@@ -1,4 +1,4 @@
-import { promises as fs, constants as fsConstants } from "fs";
+import { promises as fs, constants as fsConstants, Dirent } from "fs";
 import { exec } from "child_process";
 import { promisify } from "util";
 import path from "path";
@@ -146,6 +146,10 @@ interface FilesystemOptions {
   path?: string;
   includeFiles?: boolean;
   maxDepth?: number;
+}
+
+interface GetFilesOptions extends FilesystemOptions {
+  limit?: number;
 }
 
 interface UploadedFileDescriptor {
@@ -296,21 +300,7 @@ const getWorktreeInfo = async (
   }
 };
 
-const isSubsequence = (needle: string, haystack: string) => {
-  if (!needle) return true;
-  let index = 0;
-  for (const char of haystack) {
-    if (char === needle[index]) {
-      index += 1;
-      if (index === needle.length) {
-        return true;
-      }
-    }
-  }
-  return false;
-};
-
-export const getFilesystemDirectories = async ({
+export const searchFiles = async ({
   path: targetPath,
   includeFiles = false,
   maxDepth,
@@ -508,6 +498,231 @@ export const getFilesystemDirectories = async ({
       : BASE_WORKSPACE_PATH,
     entries: validEntries,
     count: validEntries.length,
+    maxDepth: depth,
+    currentInGitRepo: Boolean(targetPath && currentGitRootAbsolute !== null),
+    currentGitRoot: targetPath ? currentGitRootRelative : null,
+    currentIsWorktree: targetPath ? worktreeInfo.isWorktree : false,
+    currentWorktreeDir: targetPath ? worktreeInfo.worktreeDir : null,
+    timestamp: new Date().toISOString(),
+  };
+};
+
+export const getFiles = async ({
+  path: targetPath,
+  includeFiles = true,
+  maxDepth,
+  limit = 200,
+}: GetFilesOptions) => {
+  const requestedDepth =
+    typeof maxDepth === "number" && Number.isFinite(maxDepth)
+      ? maxDepth
+      : DEFAULT_DIRECTORY_DEPTH;
+  const depth = Math.min(Math.max(requestedDepth, 1), MAX_DIRECTORY_DEPTH);
+  const effectiveLimit =
+    typeof limit === "number" && Number.isFinite(limit) && limit > 0
+      ? limit
+      : 200;
+
+  let fullPath = BASE_WORKSPACE_PATH;
+
+  try {
+    const resolved = resolveTargetPath(targetPath);
+    fullPath = resolved.fullPath;
+  } catch (error) {
+    if (error instanceof AgentError) {
+      throw error;
+    }
+    throw new AgentError("Failed to resolve target path", 400, error as Error);
+  }
+
+  type Entry = {
+    name: string;
+    type: "file" | "directory";
+    path: string;
+    inGitRepo: boolean;
+    gitRoot: string | null;
+  };
+
+  const entries: Entry[] = [];
+
+  // If the path itself is a file, include it as the first entry
+  try {
+    const stats = await fs.stat(fullPath);
+    if (stats.isFile() && includeFiles) {
+      const relativePath = path.relative(BASE_WORKSPACE_PATH, fullPath);
+      if (
+        !relativePath.startsWith("..") &&
+        !path.isAbsolute(relativePath) &&
+        !relativePath.includes("/.git/")
+      ) {
+        const gitRootAbsolute = await findGitRootForPath(fullPath, false);
+        const gitRootRelative = gitRootAbsolute
+          ? path.relative(BASE_WORKSPACE_PATH, gitRootAbsolute) || "/"
+          : null;
+
+        entries.push({
+          name: path.basename(relativePath),
+          type: "file",
+          path: relativePath,
+          inGitRepo: gitRootAbsolute !== null,
+          gitRoot: gitRootRelative,
+        });
+      }
+    }
+  } catch {
+    // If the path doesn't exist, we'll fall back to an empty entries list
+  }
+
+  const queue: { absoluteDir: string; currentDepth: number }[] = [];
+
+  try {
+    const stats = await fs.stat(fullPath);
+    if (stats.isDirectory()) {
+      queue.push({ absoluteDir: fullPath, currentDepth: 0 });
+    }
+  } catch {
+    // Non-existent directory: no children to traverse
+  }
+
+  // BFS traversal to collect child files (and optionally directories)
+  while (queue.length > 0 && entries.length < effectiveLimit) {
+    const { absoluteDir, currentDepth } = queue.shift()!;
+
+    if (!absoluteDir.startsWith(BASE_WORKSPACE_PATH)) {
+      continue;
+    }
+
+    let dirEntries: Dirent[];
+    try {
+      dirEntries = await fs.readdir(absoluteDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const dirent of dirEntries) {
+      const name = dirent.name;
+      if (name === "." || name === ".." || name === ".git") {
+        continue;
+      }
+
+      const childAbsolute = path.join(absoluteDir, name);
+      const relativePath = path.relative(BASE_WORKSPACE_PATH, childAbsolute);
+
+      if (
+        relativePath.startsWith("..") ||
+        path.isAbsolute(relativePath) ||
+        relativePath.includes("/.git/")
+      ) {
+        continue;
+      }
+
+      const isDirectory = dirent.isDirectory();
+
+      if (isDirectory) {
+        if (currentDepth + 1 <= depth) {
+          queue.push({
+            absoluteDir: childAbsolute,
+            currentDepth: currentDepth + 1,
+          });
+        }
+
+        if (!includeFiles) {
+          const gitRootAbsolute = await findGitRootForPath(childAbsolute, true);
+          const gitRootRelative = gitRootAbsolute
+            ? path.relative(BASE_WORKSPACE_PATH, gitRootAbsolute) || "/"
+            : null;
+
+          entries.push({
+            name,
+            type: "directory",
+            path: relativePath,
+            inGitRepo: gitRootAbsolute !== null,
+            gitRoot: gitRootRelative,
+          });
+        }
+      } else if (dirent.isFile() && includeFiles) {
+        const gitRootAbsolute = await findGitRootForPath(childAbsolute, false);
+        const gitRootRelative = gitRootAbsolute
+          ? path.relative(BASE_WORKSPACE_PATH, gitRootAbsolute) || "/"
+          : null;
+
+        entries.push({
+          name,
+          type: "file",
+          path: relativePath,
+          inGitRepo: gitRootAbsolute !== null,
+          gitRoot: gitRootRelative,
+        });
+      }
+
+      if (entries.length >= effectiveLimit) {
+        break;
+      }
+    }
+  }
+
+  const sortedEntries = entries
+    .filter((entry) => entry.type === "directory" || includeFiles)
+    .sort((a, b) => a.path.localeCompare(b.path));
+
+  let currentGitRootAbsolute: string | null = null;
+  let currentGitRootRelative: string | null = null;
+
+  let worktreeInfo: { isWorktree: boolean; worktreeDir: string | null } = {
+    isWorktree: false,
+    worktreeDir: null,
+  };
+
+  if (targetPath && targetPath.trim().length > 0) {
+    try {
+      const { fullPath: resolvedFullPath } = resolveTargetPath(targetPath);
+
+      let inspectionPath = resolvedFullPath;
+      let stats: Awaited<ReturnType<typeof fs.stat>> | null = null;
+
+      // Walk up until we find an existing path within the workspace.
+      while (inspectionPath.startsWith(BASE_WORKSPACE_PATH)) {
+        try {
+          stats = await fs.stat(inspectionPath);
+          break;
+        } catch {
+          const parent = path.dirname(inspectionPath);
+          if (parent === inspectionPath) {
+            break;
+          }
+          inspectionPath = parent;
+        }
+      }
+
+      if (stats) {
+        const isDirectory = stats.isDirectory();
+        currentGitRootAbsolute = await findGitRootForPath(
+          inspectionPath,
+          isDirectory
+        );
+        currentGitRootRelative = currentGitRootAbsolute
+          ? path.relative(BASE_WORKSPACE_PATH, currentGitRootAbsolute) || "/"
+          : null;
+
+        const worktreeTargetDir = isDirectory
+          ? inspectionPath
+          : path.dirname(inspectionPath);
+        if (currentGitRootAbsolute) {
+          worktreeInfo = await getWorktreeInfo(currentGitRootAbsolute);
+        } else if (worktreeTargetDir.startsWith(BASE_WORKSPACE_PATH)) {
+          worktreeInfo = await getWorktreeInfo(worktreeTargetDir);
+        }
+      }
+    } catch {
+      // Ignore invalid target paths; fall back to defaults.
+    }
+  }
+
+  return {
+    path: targetPath,
+    fullPath,
+    entries: sortedEntries,
+    count: sortedEntries.length,
     maxDepth: depth,
     currentInGitRepo: Boolean(targetPath && currentGitRootAbsolute !== null),
     currentGitRoot: targetPath ? currentGitRootRelative : null,

@@ -584,7 +584,13 @@ export const getFiles = async ({
     // Non-existent directory: no children to traverse
   }
 
-  // BFS traversal to collect child files (and optionally directories)
+  // BFS traversal to collect child files/directories up to the requested depth.
+  // Depth semantics:
+  // - The starting directory is depth 0.
+  // - Its direct children (files + directories) are depth 1.
+  // - Children of those directories are depth 2, and so on.
+  // We include entries with entryDepth <= depth, and we only traverse into
+  // subdirectories when entryDepth < depth.
   while (queue.length > 0 && entries.length < effectiveLimit) {
     const { absoluteDir, currentDepth } = queue.shift()!;
 
@@ -616,30 +622,35 @@ export const getFiles = async ({
         continue;
       }
 
+      const entryDepth = currentDepth + 1;
+      // Do not include or traverse entries beyond the configured depth
+      if (entryDepth > depth) {
+        continue;
+      }
+
       const isDirectory = dirent.isDirectory();
 
       if (isDirectory) {
-        if (currentDepth + 1 <= depth) {
+        // Only traverse into this directory if we haven't yet reached the max depth
+        if (entryDepth < depth) {
           queue.push({
             absoluteDir: childAbsolute,
-            currentDepth: currentDepth + 1,
+            currentDepth: entryDepth,
           });
         }
 
-        if (!includeFiles) {
-          const gitRootAbsolute = await findGitRootForPath(childAbsolute, true);
-          const gitRootRelative = gitRootAbsolute
-            ? path.relative(BASE_WORKSPACE_PATH, gitRootAbsolute) || "/"
-            : null;
+        const gitRootAbsolute = await findGitRootForPath(childAbsolute, true);
+        const gitRootRelative = gitRootAbsolute
+          ? path.relative(BASE_WORKSPACE_PATH, gitRootAbsolute) || "/"
+          : null;
 
-          entries.push({
-            name,
-            type: "directory",
-            path: relativePath,
-            inGitRepo: gitRootAbsolute !== null,
-            gitRoot: gitRootRelative,
-          });
-        }
+        entries.push({
+          name,
+          type: "directory",
+          path: relativePath,
+          inGitRepo: gitRootAbsolute !== null,
+          gitRoot: gitRootRelative,
+        });
       } else if (dirent.isFile() && includeFiles) {
         const gitRootAbsolute = await findGitRootForPath(childAbsolute, false);
         const gitRootRelative = gitRootAbsolute
